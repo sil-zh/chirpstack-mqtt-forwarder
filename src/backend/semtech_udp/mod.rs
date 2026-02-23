@@ -363,6 +363,49 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
     let gateway_stats = pl.to_proto_gateway_stats()?;
 
     for uf in &uplink_frames {
+
+        
+          let mhdr = uf.phy_payload[0];
+          let f_type = mhdr >> 5;
+
+          let mut dev_addr: Option<[u8; 4]> = match f_type {
+              0x02 | 0x04 => {
+                 if uf.phy_payload.len() >= 5 {
+                      let mut dev_addr: [u8; 4] = [0; 4];
+                      dev_addr.clone_from_slice(&uf.phy_payload[1..5]);
+                      dev_addr.reverse();
+                      Some(dev_addr)
+                 } else {
+                      None
+                 }
+              }
+              _ => None,
+          };
+
+          let mut dev_eui: Option<[u8; 8]> = None; 
+          let mut join_eui: Option<[u8; 8]> = match f_type {
+              0x00 => {
+                 if uf.phy_payload.len() >= 17 {
+                      let mut join_eui: [u8; 8] = [0; 8];
+                      join_eui.clone_from_slice(&uf.phy_payload[1..9]);
+                      join_eui.reverse();
+
+
+                      let mut extracted_dev_eui: [u8; 8] = [0; 8];
+                      extracted_dev_eui.clone_from_slice(&uf.phy_payload[9..17]);
+                      extracted_dev_eui.reverse();
+                      dev_eui = Some(extracted_dev_eui);
+                     
+                      Some(join_eui)
+                     
+                 } else {
+                      None
+                 }
+              }
+              _ => None,
+          };
+
+
         if let Some(rx_info) = &uf.rx_info
             && !((rx_info.crc_status() == gw::CrcStatus::CrcOk && state.forward_crc_ok)
                 || (rx_info.crc_status() == gw::CrcStatus::BadCrc && state.forward_crc_invalid)
@@ -377,14 +420,56 @@ async fn handle_push_data(state: &Arc<State>, data: &[u8], remote: &SocketAddr) 
             }
 
         if lrwn_filters::matches(&uf.phy_payload, &state.filters) {
-            state.count_uplink(uf).await?;
-            send_uplink_frame(uf).await?;
+                state.count_uplink(uf).await?;
+                send_uplink_frame(uf).await?;
+                
+                if let Some(dev_addr) = dev_addr {
+                        let dev_addr_value = u32::from_be_bytes(dev_addr);
+                        debug!(
+                            "Sending uplink to MQTT Bridge, dev_addr: {:08X} uplink_id: {}",
+                            dev_addr_value,
+                            uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
+                        );
+                } else if let Some(join_eui) = join_eui {
+                        let join_eui_value = u64::from_be_bytes(join_eui);
+                        let dev_eui_value = u64::from_be_bytes(dev_eui.unwrap());
+                        debug!(
+                            "Sending uplink to MQTT Bridge,  join_eui: {:016X}, dev_eui: {:016X}, uplink_id: {}",
+                            join_eui_value,
+                            dev_eui_value,
+                            uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
+                            
+                        );
+                } else {
+                        debug!("Nothing found in phy_payload.");
+                }
         } else {
-            debug!(
-                "Ignoring uplink frame because of dev_addr and join_eui filters, uplink_id: {}",
-                uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
-            );
+
+
+
+                // Debug logs based on extracted values
+                if let Some(dev_addr) = dev_addr {
+                        let dev_addr_value = u32::from_be_bytes(dev_addr);
+                        debug!(
+                            "Ignoring uplink frame because of dev_addr filters, dev_addr: {:08X} uplink_id: {}",
+                            dev_addr_value,
+                            uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
+                        );
+                } else if let Some(join_eui) = join_eui {
+                        let join_eui_value = u64::from_be_bytes(join_eui);
+                        let dev_eui_value = u64::from_be_bytes(dev_eui.unwrap());
+                        debug!(
+                            "Ignoring uplink frame because of join_eui filters, join_eui: {:016X}, dev_eui: {:016X}, uplink_id: {}",
+                            join_eui_value,
+                            dev_eui_value,
+                            uf.rx_info.as_ref().map(|v| v.uplink_id).unwrap_or_default()
+                            
+                        );
+                } else {
+                        debug!("Nothing found in phy_payload.");
+                }
         }
+
     }
 
     if let Some(mut stats) = gateway_stats {
